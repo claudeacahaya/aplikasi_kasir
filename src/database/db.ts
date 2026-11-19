@@ -40,6 +40,16 @@ export interface TransactionRecord {
   items: TransactionDetailItem[];
 }
 
+export const SECURITY_QUESTIONS = [
+  'Nama hewan peliharaan pertama?',
+  'Kota kelahiran?',
+  'Makanan favorit?',
+] as const;
+
+function normalizeSecurityAnswer(value: unknown): string {
+  return typeof value === 'string' ? value.trim().toLowerCase() : '';
+}
+
 let dbInstance: SQLite.SQLiteDatabase | null = null;
 let activeUserEmail: string | null = null;
 
@@ -59,7 +69,9 @@ async function initTables(db: SQLite.SQLiteDatabase): Promise<void> {
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       email TEXT NOT NULL UNIQUE,
       password TEXT NOT NULL,
-      created_at TEXT NOT NULL
+      created_at TEXT NOT NULL,
+      security_question TEXT,
+      security_answer TEXT
     );
 
     CREATE TABLE IF NOT EXISTS products (
@@ -94,6 +106,23 @@ async function initTables(db: SQLite.SQLiteDatabase): Promise<void> {
       FOREIGN KEY (transaction_id) REFERENCES transactions(id) ON DELETE CASCADE
     );
   `);
+
+  const userColumns = await db.getAllAsync<{ name: string }>(
+    'PRAGMA table_info(users)'
+  );
+  const hasSecurityQuestionColumn = userColumns.some(
+    (column) => column.name === 'security_question'
+  );
+  const hasSecurityAnswerColumn = userColumns.some(
+    (column) => column.name === 'security_answer'
+  );
+
+  if (!hasSecurityQuestionColumn) {
+    await db.execAsync('ALTER TABLE users ADD COLUMN security_question TEXT;');
+  }
+  if (!hasSecurityAnswerColumn) {
+    await db.execAsync('ALTER TABLE users ADD COLUMN security_answer TEXT;');
+  }
 
   const productColumns = await db.getAllAsync<{ name: string }>(
     'PRAGMA table_info(products)'
@@ -190,6 +219,18 @@ export async function apiRequest<T = unknown>(
     if (endpoint === '/auth/register' && method === 'POST') {
       const email = String(body.email || '').trim().toLowerCase();
       const password = String(body.password || '');
+      const securityQuestion = String(body.securityQuestion || '').trim();
+      const securityAnswer = normalizeSecurityAnswer(body.securityAnswer);
+
+      if (!securityQuestion) {
+        return { ok: false, message: 'Pertanyaan keamanan wajib dipilih.' };
+      }
+      if (!(SECURITY_QUESTIONS as readonly string[]).includes(securityQuestion)) {
+        return { ok: false, message: 'Pilihan pertanyaan keamanan tidak valid.' };
+      }
+      if (!securityAnswer) {
+        return { ok: false, message: 'Jawaban keamanan wajib diisi.' };
+      }
 
       const existing = await db.getFirstAsync<{ id: number }>(
         'SELECT id FROM users WHERE email = ?',
@@ -200,8 +241,16 @@ export async function apiRequest<T = unknown>(
       }
 
       await db.runAsync(
-        'INSERT INTO users (email, password, created_at) VALUES (?, ?, ?)',
-        [email, password, new Date().toISOString()]
+        `INSERT INTO users
+          (email, password, security_question, security_answer, created_at)
+         VALUES (?, ?, ?, ?, ?)`,
+        [
+          email,
+          password,
+          securityQuestion,
+          securityAnswer,
+          new Date().toISOString(),
+        ]
       );
       activeUserEmail = email;
 
@@ -233,10 +282,41 @@ export async function apiRequest<T = unknown>(
       };
     }
 
-    if (endpoint === '/auth/forgot-password' && method === 'POST') {
+    if (endpoint === '/auth/reset-password' && method === 'POST') {
+      const email = String(body.email || '').trim().toLowerCase();
+      const securityQuestion = String(body.securityQuestion || '').trim();
+      const securityAnswer = normalizeSecurityAnswer(body.securityAnswer);
+      const newPassword = String(body.newPassword || '');
+
+      if (!email || !securityQuestion || !securityAnswer || newPassword.length < 6) {
+        return {
+          ok: false,
+          message:
+            'Lengkapi email, pertanyaan, jawaban keamanan, dan sandi baru (min. 6 karakter).',
+        };
+      }
+
+      const user = await db.getFirstAsync<{ id: number }>(
+        `SELECT id FROM users
+         WHERE email = ? AND security_question = ? AND security_answer = ?`,
+        [email, securityQuestion, securityAnswer]
+      );
+
+      if (!user) {
+        return {
+          ok: false,
+          message: 'Email, pertanyaan, atau jawaban keamanan tidak sesuai.',
+        };
+      }
+
+      await db.runAsync('UPDATE users SET password = ? WHERE id = ?', [
+        newPassword,
+        user.id,
+      ]);
+
       return {
         ok: true,
-        message: 'Jika email terdaftar, link reset telah dikirim.',
+        message: 'Sandi berhasil diubah. Silakan login dengan sandi baru.',
       };
     }
 
